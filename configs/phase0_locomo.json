@@ -1,0 +1,11 @@
+{
+  "name": "phase0_locomo_fast",
+  "dataset": "locomo",
+  "data_path": "../A-mem-main/A-mem-main/data/locomo10.json",
+  "limit_samples": 1,
+  "limit_questions_per_sample": 20,
+  "k": 5,
+  "methods": ["raw_topk", "amem_box", "aamem", "oracle"],
+  "out_dir": "runs/phase0_locomo",
+  "claim": "LoCoMo stresses long-context personal memory, multi-hop evidence, and empty-evidence/adversarial questions."
+}

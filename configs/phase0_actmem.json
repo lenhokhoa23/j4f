@@ -1,0 +1,10 @@
+{
+  "name": "phase0_actmem_fast",
+  "dataset": "actmem",
+  "data_path": "../frontier_memory_repos/ActMem/dataset/ActMemEval.json",
+  "limit": 20,
+  "k": 5,
+  "methods": ["raw_topk", "amem_box", "aamem", "oracle"],
+  "out_dir": "runs/phase0_actmem",
+  "claim": "AAMem should keep useful evidence while lowering token and noise cost versus raw top-k and A-MEM-style box expansion."
+}

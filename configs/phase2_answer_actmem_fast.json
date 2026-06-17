@@ -1,0 +1,12 @@
+{
+  "name": "phase2_answer_actmem_fast",
+  "dataset": "actmem",
+  "data_path": "../frontier_memory_repos/ActMem/dataset/ActMemEval.json",
+  "limit": 10,
+  "k": 5,
+  "methods": ["raw_topk", "amem_box", "aamem", "oracle"],
+  "provider": "heuristic",
+  "judge_provider": "heuristic",
+  "out_dir": "runs/phase2_answer",
+  "claim": "Measure whether cleaner memory packets improve final answer metrics, not only retrieval metrics."
+}

@@ -1,0 +1,12 @@
+{
+  "name": "phase3_stale_fast",
+  "suite": "synthetic_stale",
+  "limit": 12,
+  "noise_per_case": 4,
+  "dimensions": ["SR", "PR", "IPA"],
+  "k": 5,
+  "methods": ["raw_topk", "amem_box", "aamem", "aamem_stale_guard", "oracle"],
+  "provider": "heuristic",
+  "out_dir": "runs/phase3_stale",
+  "claim": "Stress whether a method uses fresh/current memory rather than stale but lexically similar memory."
+}

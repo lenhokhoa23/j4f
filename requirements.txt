@@ -1,0 +1,7 @@
+# The core lab code uses only the Python standard library.
+# Install pytest only if you want to run the smoke tests.
+pytest>=8.0
+
+# Optional on Colab for --provider hf:
+# transformers>=4.40
+# accelerate>=0.30
