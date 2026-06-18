@@ -59,6 +59,7 @@ FAILURE_TERMS = {
 
 
 _HF_LLM_CACHE: Dict[str, Any] = {}
+_OFFICIAL_METRIC_RESOURCES_READY = False
 
 
 def _extract_backend_model(args: Sequence[Any], kwargs: Dict[str, Any]) -> tuple[str, str]:
@@ -734,6 +735,70 @@ def _load_official_modules(amem_repo: Path) -> Dict[str, Any]:
             sys.path.insert(0, str(repo))
 
 
+def _ensure_official_metric_resources(force: bool = False) -> None:
+    """Fail fast if official A-MEM metric dependencies are missing.
+
+    A-MEM's utils.calculate_metrics calls nltk.word_tokenize for BLEU. Recent
+    NLTK releases need the extra punkt_tab package, while the official repo only
+    downloads punkt and wordnet. Checking this before memory construction avoids
+    wasting a long build only to crash on the first QA metric.
+    """
+
+    global _OFFICIAL_METRIC_RESOURCES_READY
+    if _OFFICIAL_METRIC_RESOURCES_READY and not force:
+        return
+
+    try:
+        import nltk
+    except ImportError as exc:
+        raise RuntimeError("Official A-MEM metrics require nltk. Install the official requirements first.") from exc
+
+    def download(package: str) -> None:
+        print(f"[init] downloading NLTK resource for official metrics: {package}", flush=True)
+        ok = nltk.download(package, quiet=True)
+        if not ok:
+            print(f"[init] warning: nltk.download({package!r}) returned False", flush=True)
+
+    if force:
+        for package in ("punkt", "punkt_tab"):
+            download(package)
+
+    try:
+        nltk.word_tokenize("A-MEM metric preflight.")
+    except LookupError:
+        for package in ("punkt", "punkt_tab"):
+            download(package)
+        try:
+            nltk.word_tokenize("A-MEM metric preflight.")
+        except LookupError as exc:
+            raise RuntimeError(
+                "NLTK tokenizer data is still missing after attempting downloads. "
+                "Run in Colab once: import nltk; nltk.download('punkt'); nltk.download('punkt_tab')"
+            ) from exc
+
+    for package, resource in (
+        ("wordnet", "corpora/wordnet"),
+        ("omw-1.4", "corpora/omw-1.4"),
+    ):
+        try:
+            nltk.data.find(resource)
+        except LookupError:
+            download(package)
+
+    _OFFICIAL_METRIC_RESOURCES_READY = True
+    print("[init] NLTK resources for official metrics are ready", flush=True)
+
+
+def _calculate_official_metrics(official: Dict[str, Any], prediction: str, reference: str) -> Dict[str, float]:
+    _ensure_official_metric_resources()
+    try:
+        return official["utils"].calculate_metrics(prediction, reference)
+    except LookupError:
+        print("[metrics] NLTK resource lookup failed during metric calculation; refreshing resources once", flush=True)
+        _ensure_official_metric_resources(force=True)
+        return official["utils"].calculate_metrics(prediction, reference)
+
+
 def _patch_hf_backend(official: Dict[str, Any], max_new_tokens: int) -> None:
     """Patch official robust modules so backend='hf' works without changing A-MEM logic."""
 
@@ -953,6 +1018,7 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
     print("[init] importing official A-MEM modules...", flush=True)
     official = _load_official_modules(amem_repo)
     print("[init] official modules imported", flush=True)
+    _ensure_official_metric_resources()
     requested_backends = {args.backend, args.gate_backend or args.backend}
     if "hf" in requested_backends:
         print("[init] enabling local HuggingFace backend patch for official robust A-MEM", flush=True)
@@ -1103,7 +1169,7 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
                     response_error = ""
                 latency = time.time() - start
                 prediction = official["llm_text_parsers"].parse_plain_text_answer(raw_response)
-                metrics = official["utils"].calculate_metrics(prediction, qa.final_answer) if qa.final_answer else {
+                metrics = _calculate_official_metrics(official, prediction, qa.final_answer) if qa.final_answer else {
                     "exact_match": 0,
                     "f1": 0.0,
                     "rouge1_f": 0.0,
