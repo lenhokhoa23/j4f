@@ -58,6 +58,102 @@ FAILURE_TERMS = {
 }
 
 
+_HF_LLM_CACHE: Dict[str, Any] = {}
+
+
+def _extract_backend_model(args: Sequence[Any], kwargs: Dict[str, Any]) -> tuple[str, str]:
+    backend = kwargs.get("backend")
+    model = kwargs.get("model")
+    if backend is None and args:
+        backend = args[0]
+    if model is None and len(args) > 1:
+        model = args[1]
+    return str(backend or "hf"), str(model or "Qwen/Qwen2.5-1.5B-Instruct")
+
+
+class HFLocalTextLLM:
+    """Small HuggingFace local LLM with the same get_completion surface as A-MEM controllers."""
+
+    SYSTEM_MESSAGE = "Follow the format specified in the prompt exactly. Do not add extra commentary."
+
+    def __init__(self, model_name: str, max_new_tokens: int = 768):
+        self.model_name = model_name
+        self.max_new_tokens = max_new_tokens
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+        except ImportError as exc:
+            raise ImportError(
+                "HF backend requires transformers, torch, and accelerate. "
+                "Install with: pip install transformers accelerate"
+            ) from exc
+
+        self.torch = torch
+        print(f"[hf] loading model={model_name}", flush=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        if self.tokenizer.pad_token_id is None and self.tokenizer.eos_token_id is not None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=dtype,
+            device_map="auto" if torch.cuda.is_available() else None,
+            trust_remote_code=True,
+        )
+        if not torch.cuda.is_available():
+            self.model.to("cpu")
+        self.model.eval()
+        print("[hf] model loaded", flush=True)
+
+    def _format_prompt(self, prompt: str) -> str:
+        messages = [
+            {"role": "system", "content": self.SYSTEM_MESSAGE},
+            {"role": "user", "content": prompt},
+        ]
+        if hasattr(self.tokenizer, "apply_chat_template"):
+            return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        return f"{self.SYSTEM_MESSAGE}\n\nUser:\n{prompt}\n\nAssistant:"
+
+    def get_completion(self, prompt: str, temperature: float = 0.7) -> str:
+        text = self._format_prompt(prompt)
+        inputs = self.tokenizer(text, return_tensors="pt")
+        try:
+            device = self.model.device
+        except AttributeError:
+            device = "cuda" if self.torch.cuda.is_available() else "cpu"
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+        do_sample = temperature is not None and temperature > 0.0
+        generation_kwargs = {
+            "max_new_tokens": self.max_new_tokens,
+            "pad_token_id": self.tokenizer.eos_token_id,
+            "do_sample": do_sample,
+        }
+        if do_sample:
+            generation_kwargs["temperature"] = max(float(temperature), 1e-5)
+        with self.torch.inference_mode():
+            output_ids = self.model.generate(**inputs, **generation_kwargs)
+        new_ids = output_ids[0][inputs["input_ids"].shape[-1] :]
+        return self.tokenizer.decode(new_ids, skip_special_tokens=True).strip()
+
+
+class HFCompatibleRobustLLMController:
+    """Drop-in replacement for official RobustLLMController when backend='hf'."""
+
+    def __init__(self, *args: Any, original_cls: Optional[Any] = None, max_new_tokens: int = 768, **kwargs: Any):
+        backend, model = _extract_backend_model(args, kwargs)
+        if backend == "hf":
+            cache_key = f"{model}::{max_new_tokens}"
+            if cache_key not in _HF_LLM_CACHE:
+                _HF_LLM_CACHE[cache_key] = HFLocalTextLLM(model, max_new_tokens=max_new_tokens)
+            self.llm = _HF_LLM_CACHE[cache_key]
+            self._delegate = None
+        else:
+            if original_cls is None:
+                raise ValueError("original_cls is required for non-HF backends.")
+            self._delegate = original_cls(*args, **kwargs)
+            self.llm = self._delegate.llm
+
+
 @dataclass
 class AMemCandidate:
     local_id: str
@@ -638,6 +734,29 @@ def _load_official_modules(amem_repo: Path) -> Dict[str, Any]:
             sys.path.insert(0, str(repo))
 
 
+def _patch_hf_backend(official: Dict[str, Any], max_new_tokens: int) -> None:
+    """Patch official robust modules so backend='hf' works without changing A-MEM logic."""
+
+    memory_layer = official["memory_layer_robust"]
+    test_module = official["test_advanced_robust"]
+    original_cls = getattr(memory_layer, "_aamem_original_robust_llm_controller", None)
+    if original_cls is None:
+        original_cls = memory_layer.RobustLLMController
+        memory_layer._aamem_original_robust_llm_controller = original_cls
+
+    class PatchedRobustLLMController(HFCompatibleRobustLLMController):
+        def __init__(self, *args: Any, **kwargs: Any):
+            super().__init__(
+                *args,
+                original_cls=original_cls,
+                max_new_tokens=max_new_tokens,
+                **kwargs,
+            )
+
+    memory_layer.RobustLLMController = PatchedRobustLLMController
+    test_module.RobustLLMController = PatchedRobustLLMController
+
+
 def _safe_model_name(model: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", model)
 
@@ -834,6 +953,10 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
     print("[init] importing official A-MEM modules...", flush=True)
     official = _load_official_modules(amem_repo)
     print("[init] official modules imported", flush=True)
+    requested_backends = {args.backend, args.gate_backend or args.backend}
+    if "hf" in requested_backends:
+        print("[init] enabling local HuggingFace backend patch for official robust A-MEM", flush=True)
+        _patch_hf_backend(official, max_new_tokens=args.hf_max_new_tokens)
     dataset_path = Path(args.dataset)
     if not dataset_path.is_absolute():
         dataset_path = amem_repo / dataset_path
@@ -1096,11 +1219,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--amem-repo", default="../A-mem-main/A-mem-main", help="Path to official A-MEM repo root.")
     parser.add_argument("--dataset", default="data/locomo10.json", help="Dataset path, absolute or relative to A-MEM repo.")
-    parser.add_argument("--backend", default="openai", choices=["openai", "ollama", "sglang", "vllm"])
+    parser.add_argument("--backend", default="openai", choices=["openai", "ollama", "sglang", "vllm", "hf"])
     parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--gates", default="none,heuristic", help="Comma-separated: none,heuristic,llm")
     parser.add_argument("--gate-backend", default=None)
     parser.add_argument("--gate-model", default=None)
+    parser.add_argument("--hf-max-new-tokens", type=int, default=768)
     parser.add_argument("--ratio", type=float, default=1.0)
     parser.add_argument("--max-questions", type=int, default=None)
     parser.add_argument("--categories", default="1,2,3,4,5")

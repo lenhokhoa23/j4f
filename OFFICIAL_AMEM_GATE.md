@@ -98,6 +98,24 @@ Ghi chú:
 
 - Official script random hóa thứ tự option ở category 5. Runner này dùng `--random-seed` để so gate công bằng. Nếu muốn giảm nhiễu khi so với official script gốc, có thể chạy `--categories 1,2,3,4` trước.
 - Official metrics có BERTScore/METEOR/ROUGE/BLEU nên lần đầu có thể tải model hoặc NLTK data.
+- Nếu Colab lỗi vLLM/CUDA như `libcudart.so.13`, dùng `--backend hf` để gọi model HuggingFace trực tiếp bằng `transformers`.
+
+Ví dụ Colab không cần vLLM:
+
+```bash
+python -m aamem_lab.official_amem_gate_runner \
+  --amem-repo ../AgenticMemory \
+  --dataset ../AgenticMemory/data/locomo10.json \
+  --backend hf \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
+  --gates none,heuristic \
+  --ratio 0.1 \
+  --max-questions 30 \
+  --retrieve-k 10 \
+  --hf-max-new-tokens 768 \
+  --output-dir runs/official_amem_gate \
+  --tag amem_none_heuristic_hf_qwen15b_n30
+```
 
 ---
 

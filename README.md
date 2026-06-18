@@ -34,6 +34,8 @@ Runner này dùng đúng read-time pipeline robust của official A-MEM để so
 
 Bảng cuối dùng metric official A-MEM từ `utils.calculate_metrics`: exact match, F1, ROUGE-1/2/L, BLEU-1..4, BERTScore F1, METEOR và SBERT similarity. Bảng phụ in token/context metric để xem gate giảm prompt hay làm tụt/tăng chất lượng trả lời.
 
+Trên Colab, notebook mặc định dùng `--backend hf` để gọi model HuggingFace trực tiếp bằng `transformers`. Đường này chậm hơn vLLM nhưng tránh lỗi CUDA wheel kiểu `libcudart.so.13` khi `pip install vllm` không khớp runtime Colab.
+
 Nói ngắn gọn: một memory có thể được retriever kéo lên top-k vì giống câu hỏi về mặt từ vựng/ngữ nghĩa, nhưng nó vẫn có thể không nên đưa vào prompt vì nó cũ, sai ngữ cảnh, mâu thuẫn, chỉ là background, hoặc quá tốn token so với giá trị thực sự. AAMem thêm một lớp gate sau retrieval và trước prompt để quyết định memory nào được phép dùng như premise.
 
 ## Ta đang đánh vào điểm nào?
