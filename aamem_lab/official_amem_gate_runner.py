@@ -799,6 +799,50 @@ def _calculate_official_metrics(official: Dict[str, Any], prediction: str, refer
         return official["utils"].calculate_metrics(prediction, reference)
 
 
+def _patch_official_metric_runtime(official: Dict[str, Any]) -> None:
+    """Keep official metrics, but avoid reloading BERTScore's model every answer."""
+
+    utils = official["utils"]
+    if getattr(utils, "_aamem_lab_metric_runtime_patched", False):
+        return
+
+    try:
+        from bert_score import BERTScorer
+    except ImportError:
+        print("[init] bert-score is not installed; official utils will handle BERTScore errors", flush=True)
+        return
+
+    scorer_cache: Dict[str, Any] = {}
+
+    def calculate_bert_scores_cached(prediction: str, reference: str) -> Dict[str, float]:
+        try:
+            scorer = scorer_cache.get("en")
+            if scorer is None:
+                print("[init] loading cached official BERTScore scorer: lang=en / roberta-large", flush=True)
+                scorer = BERTScorer(lang="en", verbose=False)
+                scorer_cache["en"] = scorer
+            try:
+                precision, recall, f1_score = scorer.score([prediction], [reference], verbose=False)
+            except TypeError:
+                precision, recall, f1_score = scorer.score([prediction], [reference])
+            return {
+                "bert_precision": precision.item(),
+                "bert_recall": recall.item(),
+                "bert_f1": f1_score.item(),
+            }
+        except Exception as exc:
+            print(f"Error calculating BERTScore: {exc}", flush=True)
+            return {
+                "bert_precision": 0.0,
+                "bert_recall": 0.0,
+                "bert_f1": 0.0,
+            }
+
+    utils.calculate_bert_scores = calculate_bert_scores_cached
+    utils._aamem_lab_metric_runtime_patched = True
+    print("[init] patched official BERTScore metric to reuse one cached scorer", flush=True)
+
+
 def _patch_hf_backend(official: Dict[str, Any], max_new_tokens: int) -> None:
     """Patch official robust modules so backend='hf' works without changing A-MEM logic."""
 
@@ -1019,6 +1063,7 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
     official = _load_official_modules(amem_repo)
     print("[init] official modules imported", flush=True)
     _ensure_official_metric_resources()
+    _patch_official_metric_runtime(official)
     requested_backends = {args.backend, args.gate_backend or args.backend}
     if "hf" in requested_backends:
         print("[init] enabling local HuggingFace backend patch for official robust A-MEM", flush=True)
