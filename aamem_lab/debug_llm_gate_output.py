@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sglang-host", default="http://localhost")
     parser.add_argument("--sglang-port", type=int, default=30000)
     parser.add_argument("--cache-dir", default=None)
-    parser.add_argument("--max-candidates", type=int, default=32)
+    parser.add_argument("--max-candidates", type=int, default=8)
     parser.add_argument("--allow-build", action="store_true", help="Allow building sample memory if cache is absent.")
     parser.add_argument("--print-prompt", action="store_true")
     return parser.parse_args()

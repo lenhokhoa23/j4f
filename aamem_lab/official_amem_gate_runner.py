@@ -351,11 +351,13 @@ class LLMJsonAMemApplicabilityGate(AMemApplicabilityGate):
         self,
         llm_controller: Any,
         fallback_gate: Optional[AMemApplicabilityGate] = None,
-        max_candidates: int = 32,
+        max_candidates: int = 8,
+        min_decision_coverage: float = 0.8,
     ):
         self.llm_controller = llm_controller
         self.fallback_gate = fallback_gate or HeuristicAMemApplicabilityGate()
         self.max_candidates = max_candidates
+        self.min_decision_coverage = min_decision_coverage
 
     def judge(
         self,
@@ -364,17 +366,60 @@ class LLMJsonAMemApplicabilityGate(AMemApplicabilityGate):
         candidates: Sequence[AMemCandidate],
     ) -> List[GateDecision]:
         limited = list(candidates)[: self.max_candidates]
+        if not limited:
+            return []
         prompt = self._build_prompt(question, retrieval_query, limited)
         try:
             raw = self.llm_controller.llm.get_completion(prompt, temperature=0.0)
             parsed = self._parse_gate_output(raw)
-            return self._decisions_from_json(parsed, limited)
+            decisions = self._decisions_from_json(parsed, limited)
+            return self._complete_or_reject_decisions(
+                decisions=decisions,
+                candidates=limited,
+                question=question,
+                retrieval_query=retrieval_query,
+            )
         except Exception as exc:
-            fallback = self.fallback_gate.judge(question, retrieval_query, candidates)
+            return self._fallback_decisions(question, retrieval_query, limited, exc)
+
+    def _fallback_decisions(
+        self,
+        question: str,
+        retrieval_query: str,
+        candidates: Sequence[AMemCandidate],
+        exc: Exception,
+    ) -> List[GateDecision]:
+        fallback = self.fallback_gate.judge(question, retrieval_query, candidates)
+        for decision in fallback:
+            decision.scores["llm_gate_failed"] = 1.0
+            decision.scores["llm_gate_error"] = str(exc)[:300]
+        return fallback
+
+    def _complete_or_reject_decisions(
+        self,
+        decisions: Sequence[GateDecision],
+        candidates: Sequence[AMemCandidate],
+        question: str,
+        retrieval_query: str,
+    ) -> List[GateDecision]:
+        by_local = {d.local_id: d for d in decisions}
+        expected = {c.local_id for c in candidates}
+        seen = set(by_local)
+        coverage = len(seen & expected) / max(1, len(expected))
+        if coverage < self.min_decision_coverage:
+            missing = sorted(expected - seen)
+            raise ValueError(
+                f"LLM gate returned only {coverage:.0%} candidate coverage; missing={missing[:12]}"
+            )
+        missing_candidates = [c for c in candidates if c.local_id not in seen]
+        completed = [by_local[c.local_id] for c in candidates if c.local_id in by_local]
+        if missing_candidates:
+            fallback = self.fallback_gate.judge(question, retrieval_query, missing_candidates)
             for decision in fallback:
-                decision.scores["llm_gate_failed"] = 1.0
-                decision.scores["llm_gate_error"] = str(exc)[:300]
-            return fallback
+                decision.scores["llm_gate_missing_id"] = 1.0
+            completed.extend(fallback)
+        completed.sort(key=lambda d: int(d.local_id[1:]) if d.local_id[1:].isdigit() else 10**9)
+        return completed
 
     def _build_prompt(
         self,
@@ -401,10 +446,19 @@ class LLMJsonAMemApplicabilityGate(AMemApplicabilityGate):
                 )
             )
         labels = ", ".join([APPLY, SUPPORT, WARNING, STALE, CONTRADICTED, UNCERTAIN, IRRELEVANT])
+        joined_candidates = "\n".join("-----\n" + block for block in candidate_blocks)
         return f"""You are an applicability authorization gate for an A-MEM read-time pipeline.
 
 A-MEM has already generated a retrieval query, retrieved seed memories, and expanded linked memories.
 Your task is NOT to retrieve more memories. Your task is to decide how each retrieved memory may be used.
+
+This is retrospective QA over a dated conversation log.
+There is no external "now", no hidden current date, and no implicit current time frame.
+A past timestamp is NOT a reason to mark a memory WARNING or STALE.
+For date questions, historical memories are often the exact answer evidence.
+Example: if the question asks "When is Caroline going to the transgender conference?" and a candidate says
+Timestamp: 1:36 pm on 3 July, 2023; Content: "I'm going to a transgender conference this month",
+then that candidate is APPLY because "this month" resolves to July 2023.
 
 Question:
 {question}
@@ -413,10 +467,10 @@ A-MEM retrieval query / keywords:
 {retrieval_query}
 
 Allowed labels:
-- APPLY: can be used as a current premise for answering.
+- APPLY: can be used as an answer premise, including historical/date evidence.
 - SUPPORT: relevant background only, not enough to decide the answer alone.
-- WARNING: failure/risk/constraint memory; include as caution, not as a factual premise.
-- STALE: historical memory superseded by newer evidence.
+- WARNING: failure/risk/constraint memory; include as caution, not as a factual premise. Ordinary past events are not WARNING.
+- STALE: memory superseded by newer evidence about the same exact event, status, location, preference, date, or attribute.
 - CONTRADICTED: contradicted by another retrieved memory.
 - UNCERTAIN: potentially relevant but unsafe to rely on.
 - IRRELEVANT: should be dropped.
@@ -428,10 +482,12 @@ Rules:
 4. Prefer exact answer evidence over broad topical memories.
 5. Failure/risk memories should usually be WARNING.
 6. If there is not enough evidence, use SUPPORT or UNCERTAIN rather than APPLY.
-7. Output must follow the line format exactly. Do not return JSON, markdown, bullets, or extra text.
+7. Do not invent a "current time frame" from candidate timestamps or linked memories.
+8. Do not mark a memory CONTRADICTED unless another candidate makes a mutually exclusive claim about the same fact slot.
+9. Output must follow the line format exactly. Do not return JSON, markdown, bullets, or extra text.
 
 Retrieved A-MEM candidates:
-{chr(10).join("-----\\n" + block for block in candidate_blocks)}
+{joined_candidates}
 
 Return one decision per line between BEGIN_DECISIONS and END_DECISIONS.
 Use this exact pipe-separated format:
@@ -536,9 +592,6 @@ confidence must be a number from 0 to 1.
                 )
             )
             seen.add(cid)
-        if len(seen) != len(candidates):
-            fallback = self.fallback_gate.judge("", "", [c for c in candidates if c.local_id not in seen])
-            out.extend(fallback)
         out.sort(key=lambda d: int(d.local_id[1:]) if d.local_id[1:].isdigit() else 10**9)
         return out
 
@@ -1157,7 +1210,11 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
                 sglang_host=args.sglang_host,
                 sglang_port=args.sglang_port,
             )
-            gate_objects[gate_name] = LLMJsonAMemApplicabilityGate(llm_controller)
+            gate_objects[gate_name] = LLMJsonAMemApplicabilityGate(
+                llm_controller,
+                max_candidates=args.llm_gate_max_candidates,
+                min_decision_coverage=args.llm_gate_min_coverage,
+            )
         else:
             raise ValueError(f"Unknown gate: {gate_name}. Use none, heuristic, llm.")
 
@@ -1172,7 +1229,12 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
     print(f"[config] dataset={dataset_path}", flush=True)
     print(f"[config] samples={len(samples)} categories={sorted(allowed_categories)} max_questions={args.max_questions}", flush=True)
     print(f"[config] model={args.model} backend={args.backend} retrieve_k={args.retrieve_k}", flush=True)
-    print(f"[config] gates={gates} packet_token_budget={args.packet_token_budget}", flush=True)
+    print(
+        f"[config] gates={gates} packet_token_budget={args.packet_token_budget} "
+        f"llm_gate_max_candidates={args.llm_gate_max_candidates} "
+        f"llm_gate_min_coverage={args.llm_gate_min_coverage}",
+        flush=True,
+    )
     print(f"[config] output_jsonl={jsonl_path}", flush=True)
     print(f"[config] output_summary={summary_path}", flush=True)
     jsonl_path.write_text("", encoding="utf-8")
@@ -1292,6 +1354,13 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
                     "candidate_count": float(len(candidates)),
                     "seed_count": float(len(seed_indices)),
                     "answer_latency_sec": float(latency),
+                    "gate_decision_count": float(len(decisions)),
+                    "llm_gate_failed_decisions": float(
+                        sum(1 for d in decisions if d.scores.get("llm_gate_failed", 0.0))
+                    ),
+                    "llm_gate_missing_id_decisions": float(
+                        sum(1 for d in decisions if d.scores.get("llm_gate_missing_id", 0.0))
+                    ),
                 }
                 metric_rows_by_gate[gate_name].append(metrics)
                 context_rows_by_gate[gate_name].append(context_metrics)
@@ -1395,6 +1464,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gates", default="none,heuristic", help="Comma-separated: none,heuristic,llm")
     parser.add_argument("--gate-backend", default=None)
     parser.add_argument("--gate-model", default=None)
+    parser.add_argument(
+        "--llm-gate-max-candidates",
+        type=int,
+        default=8,
+        help="Max retrieved candidates judged by the LLM gate. Small local models should use 3-8.",
+    )
+    parser.add_argument(
+        "--llm-gate-min-coverage",
+        type=float,
+        default=0.8,
+        help="Minimum fraction of candidate IDs the LLM gate must return before falling back to heuristic.",
+    )
     parser.add_argument("--hf-max-new-tokens", type=int, default=768)
     parser.add_argument("--ratio", type=float, default=1.0)
     parser.add_argument("--max-questions", type=int, default=None)
@@ -1418,6 +1499,10 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.ratio <= 0.0 or args.ratio > 1.0:
         raise ValueError("--ratio must be in (0, 1].")
+    if args.llm_gate_max_candidates <= 0:
+        raise ValueError("--llm-gate-max-candidates must be positive.")
+    if args.llm_gate_min_coverage <= 0.0 or args.llm_gate_min_coverage > 1.0:
+        raise ValueError("--llm-gate-min-coverage must be in (0, 1].")
     return args
 
 
