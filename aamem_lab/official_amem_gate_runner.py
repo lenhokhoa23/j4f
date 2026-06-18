@@ -799,6 +799,16 @@ def _calculate_official_metrics(official: Dict[str, Any], prediction: str, refer
         return official["utils"].calculate_metrics(prediction, reference)
 
 
+def _json_default(value: Any) -> Any:
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    if hasattr(value, "item"):
+        return value.item()
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
+
+
 def _patch_official_metric_runtime(official: Dict[str, Any]) -> None:
     """Keep official metrics, but avoid reloading BERTScore's model every answer."""
 
@@ -819,7 +829,7 @@ def _patch_official_metric_runtime(official: Dict[str, Any]) -> None:
             scorer = scorer_cache.get("en")
             if scorer is None:
                 print("[init] loading cached official BERTScore scorer: lang=en / roberta-large", flush=True)
-                scorer = BERTScorer(lang="en", verbose=False)
+                scorer = BERTScorer(lang="en")
                 scorer_cache["en"] = scorer
             try:
                 precision, recall, f1_score = scorer.score([prediction], [reference], verbose=False)
@@ -1263,7 +1273,7 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
                 }
                 rows.append(row)
                 with jsonl_path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    f.write(json.dumps(row, ensure_ascii=False, default=_json_default) + "\n")
                 print(
                     f"[answer] sample={sample_idx} qa={qa_idx} gate={gate_name} "
                     f"em={metrics.get('exact_match', 0):.3f} "
@@ -1291,7 +1301,7 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
 
     with jsonl_path.open("w", encoding="utf-8") as f:
         for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.write(json.dumps(row, ensure_ascii=False, default=_json_default) + "\n")
 
     summary = {
         "run_config": {
@@ -1321,7 +1331,7 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
         "rows_path": str(jsonl_path),
     }
     with summary_path.open("w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+        json.dump(summary, f, ensure_ascii=False, indent=2, default=_json_default)
     print(f"Wrote rows: {jsonl_path}")
     print(f"Wrote summary: {summary_path}")
     _print_comparison_table(summary)
