@@ -1119,6 +1119,8 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
     print(f"[config] gates={gates} packet_token_budget={args.packet_token_budget}", flush=True)
     print(f"[config] output_jsonl={jsonl_path}", flush=True)
     print(f"[config] output_summary={summary_path}", flush=True)
+    jsonl_path.write_text("", encoding="utf-8")
+    print("[config] JSONL rows will be streamed incrementally during the run", flush=True)
 
     planned_questions = _count_planned_questions(samples, allowed_categories, args.max_questions)
     progress_bar = None if args.no_progress else _make_progress_bar(planned_questions)
@@ -1260,6 +1262,8 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
                     "prompt": prompt if args.include_prompts else "",
                 }
                 rows.append(row)
+                with jsonl_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 print(
                     f"[answer] sample={sample_idx} qa={qa_idx} gate={gate_name} "
                     f"em={metrics.get('exact_match', 0):.3f} "
