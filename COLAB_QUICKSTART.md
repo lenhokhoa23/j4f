@@ -2,6 +2,14 @@
 
 Core code không cần GPU. Colab chỉ cần khi bạn muốn chạy full dataset, gọi API model, hoặc tải HuggingFace model.
 
+Notebook chính:
+
+```text
+notebooks/phase_runner.ipynb
+```
+
+Notebook này đã có section `Official A-MEM robust baseline + Layer-2 gate`. Section đó tự clone/pull repo này, clone/pull official A-MEM, chạy `--gates none,heuristic` hoặc `--gates none,heuristic,llm`, stream log từng sample/question/gate, rồi in bảng so sánh metric cuối.
+
 ## 1. Pull code từ GitHub
 
 Notebook chính đã có cell tự clone/pull repo. Nếu muốn chạy thủ công trong Colab:
@@ -124,3 +132,7 @@ Nếu Colab thiếu VRAM, giữ `--model-preset smoke` để debug pipeline trư
 - `runs/phase2_answer/*.jsonl`: từng prompt, context, answer, metric.
 - `runs/phase3_stale/*_summary.json`: stale/fresh summary.
 - `runs/phase3_stale/*.jsonl`: stale memory, fresh memory, gate decision, answer.
+- `runs/official_amem_gate/*_summary.json`: official A-MEM paper metrics theo gate.
+- `runs/official_amem_gate/*.jsonl`: từng LoCoMo QA, retrieval query, candidates, gate decision, prompt/context, prediction/gold và metric official.
+
+Metric official A-MEM được in trong bảng gồm: exact match, F1, ROUGE-1/2/L, BLEU-1..4, BERTScore F1, METEOR và SBERT similarity. Bảng context kèm theo gồm raw/final context tokens, số candidate, số seed và latency.

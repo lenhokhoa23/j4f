@@ -11,6 +11,8 @@ A-MEM query generation
   -> official A-MEM metrics
 ```
 
+Nếu chạy trên Colab, mở `notebooks/phase_runner.ipynb` và chạy section `Official A-MEM robust baseline + Layer-2 gate`. Notebook đã tích hợp clone/pull code, setup official A-MEM, stream log realtime và in bảng so sánh cuối.
+
 Điểm quan trọng:
 
 ```text
@@ -318,4 +320,3 @@ context = AUTHORIZED MEMORY PACKET
 ```
 
 sau khi A-MEM đã retrieve + expand xong.
-

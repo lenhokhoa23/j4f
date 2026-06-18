@@ -642,6 +642,13 @@ def _safe_model_name(model: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", model)
 
 
+def _preview_text(text: str, max_chars: int = 180) -> str:
+    compact = " ".join(str(text).split())
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 3] + "..."
+
+
 def _ensure_agent_memory_loaded(
     official: Dict[str, Any],
     amem_repo: Path,
@@ -709,6 +716,66 @@ def _aggregate_metric_rows(rows: Iterable[Dict[str, float]]) -> Dict[str, Dict[s
     return out
 
 
+def _summary_mean(summary_block: Dict[str, Dict[str, float]], key: str) -> float:
+    value = summary_block.get(key, {})
+    if isinstance(value, dict):
+        return float(value.get("mean", 0.0))
+    return 0.0
+
+
+def _print_comparison_table(summary: Dict[str, Any]) -> None:
+    answer_summary = summary.get("official_metric_summary_by_gate", {})
+    context_summary = summary.get("context_summary_by_gate", {})
+    headers = [
+        "gate",
+        "n",
+        "EM",
+        "F1",
+        "ROUGE-L",
+        "BLEU-1",
+        "BLEU-4",
+        "BERT-F1",
+        "METEOR",
+        "SBERT",
+        "ctx_tok",
+    ]
+    rows: List[List[str]] = []
+    for gate, metrics in answer_summary.items():
+        ctx = context_summary.get(gate, {})
+        n = int(float(metrics.get("f1", {}).get("count", 0.0))) if isinstance(metrics.get("f1"), dict) else 0
+        rows.append(
+            [
+                gate,
+                str(n),
+                f"{_summary_mean(metrics, 'exact_match'):.3f}",
+                f"{_summary_mean(metrics, 'f1'):.3f}",
+                f"{_summary_mean(metrics, 'rougeL_f'):.3f}",
+                f"{_summary_mean(metrics, 'bleu1'):.3f}",
+                f"{_summary_mean(metrics, 'bleu4'):.3f}",
+                f"{_summary_mean(metrics, 'bert_f1'):.3f}",
+                f"{_summary_mean(metrics, 'meteor'):.3f}",
+                f"{_summary_mean(metrics, 'sbert_similarity'):.3f}",
+                f"{_summary_mean(ctx, 'final_context_tokens'):.0f}",
+            ]
+        )
+    if not rows:
+        print("\nNo metric rows to summarize.", flush=True)
+        return
+
+    widths = [len(x) for x in headers]
+    for row in rows:
+        widths = [max(width, len(cell)) for width, cell in zip(widths, row)]
+
+    def fmt(row: Sequence[str]) -> str:
+        return " | ".join(cell.ljust(width) for cell, width in zip(row, widths))
+
+    print("\n=== Final comparison table: official A-MEM paper metrics ===", flush=True)
+    print(fmt(headers), flush=True)
+    print("-+-".join("-" * width for width in widths), flush=True)
+    for row in rows:
+        print(fmt(row), flush=True)
+
+
 def _label_counts(decisions: Sequence[GateDecision]) -> Dict[str, int]:
     counts = {label: 0 for label in [APPLY, SUPPORT, WARNING, STALE, CONTRADICTED, UNCERTAIN, IRRELEVANT]}
     for decision in decisions:
@@ -757,6 +824,15 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
     jsonl_path = output_dir / f"{tag}.jsonl"
     summary_path = output_dir / f"{tag}_summary.json"
 
+    print("=== Official A-MEM robust read-time eval + optional Layer-2 gate ===", flush=True)
+    print(f"[config] amem_repo={amem_repo}", flush=True)
+    print(f"[config] dataset={dataset_path}", flush=True)
+    print(f"[config] samples={len(samples)} categories={sorted(allowed_categories)} max_questions={args.max_questions}", flush=True)
+    print(f"[config] model={args.model} backend={args.backend} retrieve_k={args.retrieve_k}", flush=True)
+    print(f"[config] gates={gates} packet_token_budget={args.packet_token_budget}", flush=True)
+    print(f"[config] output_jsonl={jsonl_path}", flush=True)
+    print(f"[config] output_summary={summary_path}", flush=True)
+
     rows: List[Dict[str, Any]] = []
     metric_rows_by_gate: Dict[str, List[Dict[str, float]]] = defaultdict(list)
     context_rows_by_gate: Dict[str, List[Dict[str, float]]] = defaultdict(list)
@@ -764,6 +840,7 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
 
     total_questions = 0
     for sample_idx, sample in enumerate(samples):
+        print(f"\n[sample={sample_idx}] loading/building official A-MEM memory cache", flush=True)
         agent = _ensure_agent_memory_loaded(
             official=official,
             amem_repo=amem_repo,
@@ -777,6 +854,8 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
             sglang_port=args.sglang_port,
             cache_dir=Path(args.cache_dir) if args.cache_dir else None,
         )
+        memory_count = len(getattr(agent.memory_system, "memories", {}))
+        print(f"[sample={sample_idx}] memories={memory_count} qa_items={len(sample.qa)}", flush=True)
         for qa_idx, qa in enumerate(sample.qa):
             category = int(qa.category)
             if category not in allowed_categories:
@@ -788,6 +867,18 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
             retrieval_query = agent.generate_query_llm(qa.question)
             raw_context, candidates, seed_indices = retrieve_amem_candidates(
                 agent.memory_system, retrieval_query, args.retrieve_k
+            )
+            raw_context_tokens = estimate_tokens(raw_context)
+            print(
+                f"\n[qa] sample={sample_idx} qa={qa_idx} cat={category} "
+                f"question={_preview_text(qa.question)}",
+                flush=True,
+            )
+            print(
+                f"[retrieve] query={_preview_text(retrieval_query)} "
+                f"seed_indices={seed_indices} candidates_after_links={len(candidates)} "
+                f"raw_ctx_tok={raw_context_tokens}",
+                flush=True,
             )
             category5_options = None
             if category == 5:
@@ -878,11 +969,18 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
                 }
                 rows.append(row)
                 print(
-                    f"[sample={sample_idx} qa={qa_idx} gate={gate_name}] "
-                    f"cat={category} f1={metrics.get('f1', 0):.3f} "
+                    f"[answer] sample={sample_idx} qa={qa_idx} gate={gate_name} "
+                    f"em={metrics.get('exact_match', 0):.3f} "
+                    f"f1={metrics.get('f1', 0):.3f} "
                     f"rougeL={metrics.get('rougeL_f', 0):.3f} "
+                    f"bleu1={metrics.get('bleu1', 0):.3f} "
+                    f"meteor={metrics.get('meteor', 0):.3f} "
+                    f"sbert={metrics.get('sbert_similarity', 0):.3f} "
                     f"ctx_tok={context_metrics['final_context_tokens']:.0f} "
-                    f"labels={row['label_counts']}"
+                    f"labels={row['label_counts']} "
+                    f"pred={_preview_text(prediction, 120)} "
+                    f"gold={_preview_text(qa.final_answer or '', 120)}",
+                    flush=True,
                 )
         if args.max_questions is not None and total_questions >= args.max_questions:
             break
@@ -922,6 +1020,7 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
         json.dump(summary, f, ensure_ascii=False, indent=2)
     print(f"Wrote rows: {jsonl_path}")
     print(f"Wrote summary: {summary_path}")
+    _print_comparison_table(summary)
     return summary
 
 

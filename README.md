@@ -16,7 +16,7 @@ Notebook Colab chính:
 notebooks/phase_runner.ipynb
 ```
 
-Cell đầu của notebook sẽ clone/pull repo trên rồi chạy code từ bản mới nhất.
+Cell đầu của notebook sẽ clone/pull repo trên rồi chạy code từ bản mới nhất. Notebook này đã có section riêng để clone/pull official A-MEM, chạy baseline `none`, chạy gate `heuristic`/`llm`, stream log từng bước và in bảng so sánh cuối.
 
 Official A-MEM + Layer-2 gate:
 
@@ -31,6 +31,8 @@ Runner này dùng đúng read-time pipeline robust của official A-MEM để so
 --gates none,heuristic    # baseline + heuristic Layer-2 gate
 --gates none,heuristic,llm
 ```
+
+Bảng cuối dùng metric official A-MEM từ `utils.calculate_metrics`: exact match, F1, ROUGE-1/2/L, BLEU-1..4, BERTScore F1, METEOR và SBERT similarity. Bảng phụ in token/context metric để xem gate giảm prompt hay làm tụt/tăng chất lượng trả lời.
 
 Nói ngắn gọn: một memory có thể được retriever kéo lên top-k vì giống câu hỏi về mặt từ vựng/ngữ nghĩa, nhưng nó vẫn có thể không nên đưa vào prompt vì nó cũ, sai ngữ cảnh, mâu thuẫn, chỉ là background, hoặc quá tốn token so với giá trị thực sự. AAMem thêm một lớp gate sau retrieval và trước prompt để quyết định memory nào được phép dùng như premise.
 
