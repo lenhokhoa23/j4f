@@ -367,13 +367,13 @@ class LLMJsonAMemApplicabilityGate(AMemApplicabilityGate):
         prompt = self._build_prompt(question, retrieval_query, limited)
         try:
             raw = self.llm_controller.llm.get_completion(prompt, temperature=0.0)
-            parsed = self._parse_json(raw)
+            parsed = self._parse_gate_output(raw)
             return self._decisions_from_json(parsed, limited)
         except Exception as exc:
             fallback = self.fallback_gate.judge(question, retrieval_query, candidates)
             for decision in fallback:
-                decision.reason = f"LLM gate failed; fallback heuristic used. Error: {exc!r}. {decision.reason}"
                 decision.scores["llm_gate_failed"] = 1.0
+                decision.scores["llm_gate_error"] = str(exc)[:300]
             return fallback
 
     def _build_prompt(
@@ -384,6 +384,8 @@ class LLMJsonAMemApplicabilityGate(AMemApplicabilityGate):
     ) -> str:
         candidate_blocks = []
         for cand in candidates:
+            keywords = ", ".join(str(x) for x in cand.keywords[:8])
+            tags = ", ".join(str(x) for x in cand.tags[:8])
             candidate_blocks.append(
                 "\n".join(
                     [
@@ -391,10 +393,10 @@ class LLMJsonAMemApplicabilityGate(AMemApplicabilityGate):
                         f"Memory index: {cand.memory_index}",
                         f"Source: {cand.source}",
                         f"Timestamp: {cand.timestamp}",
-                        f"Content: {cand.content[:900]}",
-                        f"Context: {cand.context[:400]}",
-                        f"Keywords: {cand.keywords}",
-                        f"Tags: {cand.tags}",
+                        f"Content: {cand.content[:520]}",
+                        f"Context: {cand.context[:180]}",
+                        f"Keywords: {keywords}",
+                        f"Tags: {tags}",
                     ]
                 )
             )
@@ -421,40 +423,84 @@ Allowed labels:
 
 Rules:
 1. A memory can be semantically relevant but still not APPLY.
-2. Prefer newer update memories over older memories they supersede.
-3. Failure/risk memories should usually be WARNING.
-4. If there is not enough evidence, use SUPPORT or UNCERTAIN rather than APPLY.
-5. Return strict JSON only. Do not add markdown.
+2. Mark STALE only when a newer memory explicitly updates the same event, status, location, preference, date, or attribute.
+3. Do not mark a memory STALE just because a newer memory is on the same broad topic.
+4. Prefer exact answer evidence over broad topical memories.
+5. Failure/risk memories should usually be WARNING.
+6. If there is not enough evidence, use SUPPORT or UNCERTAIN rather than APPLY.
+7. Output must follow the line format exactly. Do not return JSON, markdown, bullets, or extra text.
 
 Retrieved A-MEM candidates:
 {chr(10).join("-----\\n" + block for block in candidate_blocks)}
 
-Return JSON exactly in this shape:
-{{
-  "decisions": [
-    {{
-      "id": "c0",
-      "label": "{APPLY}",
-      "usable_as_premise": true,
-      "confidence": 0.0,
-      "reason": "short reason"
-    }}
-  ]
-}}
+Return one decision per line between BEGIN_DECISIONS and END_DECISIONS.
+Use this exact pipe-separated format:
+candidate_id|LABEL|usable_as_premise|confidence|short_reason
 
-Every candidate ID must appear once. Labels must be one of: {labels}.
+Example:
+BEGIN_DECISIONS
+c0|SUPPORT|false|0.62|Related background, not exact answer evidence
+c1|APPLY|true|0.91|Directly answers the question
+END_DECISIONS
+
+Every candidate ID must appear once. LABEL must be one of: {labels}.
+usable_as_premise must be true only when LABEL is APPLY; otherwise false.
+confidence must be a number from 0 to 1.
 """
 
-    def _parse_json(self, text: str) -> Dict[str, Any]:
+    def _parse_gate_output(self, text: str) -> Dict[str, Any]:
         cleaned = (text or "").strip()
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError:
             match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-            if not match:
-                raise
-            return json.loads(match.group(0))
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    pass
+        return self._parse_decision_rows(cleaned)
+
+    def _parse_decision_rows(self, text: str) -> Dict[str, Any]:
+        lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+        in_block = False
+        decisions: List[Dict[str, Any]] = []
+        allowed = {APPLY, SUPPORT, WARNING, STALE, CONTRADICTED, UNCERTAIN, IRRELEVANT}
+        for line in lines:
+            upper = line.upper()
+            if upper == "BEGIN_DECISIONS":
+                in_block = True
+                continue
+            if upper == "END_DECISIONS":
+                break
+            if not in_block and not re.match(r"^c\d+\|", line):
+                continue
+            parts = [part.strip() for part in line.split("|", 4)]
+            if len(parts) < 5:
+                continue
+            cid, label, usable_text, confidence_text, reason = parts
+            if not re.fullmatch(r"c\d+", cid):
+                continue
+            label = label.upper()
+            if label not in allowed:
+                label = UNCERTAIN
+            try:
+                confidence = float(confidence_text)
+            except ValueError:
+                confidence = 0.5
+            decisions.append(
+                {
+                    "id": cid,
+                    "label": label,
+                    "usable_as_premise": usable_text.lower() == "true",
+                    "confidence": max(0.0, min(1.0, confidence)),
+                    "reason": reason.replace("|", "/")[:700],
+                }
+            )
+        if not decisions:
+            raise ValueError(f"Could not parse LLM gate output. Raw output preview: {text[:500]}")
+        return {"decisions": decisions}
 
     def _decisions_from_json(
         self,
