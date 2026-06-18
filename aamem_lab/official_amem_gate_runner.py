@@ -785,13 +785,22 @@ def _label_counts(decisions: Sequence[GateDecision]) -> Dict[str, int]:
 
 def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any]:
     amem_repo = Path(args.amem_repo).resolve()
+    print("=== Official A-MEM robust read-time eval + optional Layer-2 gate ===", flush=True)
+    print(f"[init] amem_repo={amem_repo}", flush=True)
+    print("[init] importing official A-MEM modules...", flush=True)
     official = _load_official_modules(amem_repo)
+    print("[init] official modules imported", flush=True)
     dataset_path = Path(args.dataset)
     if not dataset_path.is_absolute():
         dataset_path = amem_repo / dataset_path
+    print(f"[init] loading dataset={dataset_path}", flush=True)
     samples = official["load_dataset"].load_locomo_dataset(dataset_path)
+    print(f"[init] loaded raw samples={len(samples)}", flush=True)
     if args.ratio < 1.0:
         samples = samples[: max(1, int(len(samples) * args.ratio))]
+        print(f"[init] ratio={args.ratio} -> using samples={len(samples)}", flush=True)
+    else:
+        print(f"[init] ratio={args.ratio} -> using all loaded samples", flush=True)
 
     gates = [g.strip() for g in args.gates.split(",") if g.strip()]
     allowed_categories = {int(c) for c in args.categories.split(",") if c.strip()}
@@ -799,6 +808,7 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
 
     gate_objects: Dict[str, Optional[AMemApplicabilityGate]] = {}
     for gate_name in gates:
+        print(f"[init] preparing gate={gate_name}", flush=True)
         if gate_name == "none":
             gate_objects[gate_name] = None
         elif gate_name == "heuristic":
@@ -824,7 +834,6 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
     jsonl_path = output_dir / f"{tag}.jsonl"
     summary_path = output_dir / f"{tag}_summary.json"
 
-    print("=== Official A-MEM robust read-time eval + optional Layer-2 gate ===", flush=True)
     print(f"[config] amem_repo={amem_repo}", flush=True)
     print(f"[config] dataset={dataset_path}", flush=True)
     print(f"[config] samples={len(samples)} categories={sorted(allowed_categories)} max_questions={args.max_questions}", flush=True)
