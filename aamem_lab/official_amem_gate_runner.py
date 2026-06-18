@@ -661,6 +661,7 @@ def _ensure_agent_memory_loaded(
     sglang_host: str,
     sglang_port: int,
     cache_dir: Optional[Path],
+    show_progress: bool = True,
 ) -> Any:
     agent_cls = official["test_advanced_robust"].RobustAdvancedMemAgent
     agent = agent_cls(model, backend, retrieve_k, temperature_c5, sglang_host, sglang_port)
@@ -672,28 +673,51 @@ def _ensure_agent_memory_loaded(
     retriever_cache_embeddings_file = cache_dir / f"retriever_cache_embeddings_sample_{sample_idx}.npy"
 
     if memory_cache_file.exists():
+        print(f"[cache] sample={sample_idx} memory_cache=hit path={memory_cache_file}", flush=True)
         with memory_cache_file.open("rb") as f:
             cached_memories = pickle.load(f)
         agent.memory_system.memories = cached_memories
         if retriever_cache_file.exists() and retriever_cache_embeddings_file.exists():
+            print(f"[cache] sample={sample_idx} retriever_cache=hit", flush=True)
             agent.memory_system.retriever = agent.memory_system.retriever.load(
                 str(retriever_cache_file), str(retriever_cache_embeddings_file)
             )
         else:
+            print(f"[cache] sample={sample_idx} retriever_cache=miss -> rebuilding retriever from cached memories", flush=True)
             agent.memory_system.retriever = agent.memory_system.retriever.load_from_local_memory(
                 cached_memories, "all-MiniLM-L6-v2"
             )
         return agent
 
+    total_turns = sum(len(turns.turns) for turns in sample.conversation.sessions.values())
+    print(
+        f"[cache] sample={sample_idx} memory_cache=miss -> building A-MEM notes from {total_turns} turns",
+        flush=True,
+    )
+    build_progress = _make_progress_bar(total_turns, desc=f"build sample {sample_idx}", unit="turn") if show_progress else None
+    built_turns = 0
     for _, turns in sample.conversation.sessions.items():
         for turn in turns.turns:
             turn_datetime = turns.date_time
             conversation_tmp = "Speaker " + turn.speaker + "says : " + turn.text
             agent.add_memory(conversation_tmp, time=turn_datetime)
+            built_turns += 1
+            if build_progress is not None:
+                build_progress.update(1)
+                build_progress.set_postfix(memories=len(agent.memory_system.memories))
+            elif built_turns == 1 or built_turns % 10 == 0 or built_turns == total_turns:
+                print(
+                    f"[build] sample={sample_idx} turns={built_turns}/{total_turns} "
+                    f"memories={len(agent.memory_system.memories)}",
+                    flush=True,
+                )
+    if build_progress is not None:
+        build_progress.close()
 
     with memory_cache_file.open("wb") as f:
         pickle.dump(agent.memory_system.memories, f)
     agent.memory_system.retriever.save(str(retriever_cache_file), str(retriever_cache_embeddings_file))
+    print(f"[cache] sample={sample_idx} saved {len(agent.memory_system.memories)} memories to {memory_cache_file}", flush=True)
     return agent
 
 
@@ -795,12 +819,12 @@ def _count_planned_questions(samples: Sequence[Any], allowed_categories: set[int
     return total
 
 
-def _make_progress_bar(total: int) -> Any:
+def _make_progress_bar(total: int, desc: str = "official A-MEM QA", unit: str = "qa") -> Any:
     try:
         from tqdm.auto import tqdm
     except Exception:
         return None
-    return tqdm(total=total, desc="official A-MEM QA", unit="qa", dynamic_ncols=True)
+    return tqdm(total=total, desc=desc, unit=unit, dynamic_ncols=True)
 
 
 def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any]:
@@ -886,6 +910,7 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
             sglang_host=args.sglang_host,
             sglang_port=args.sglang_port,
             cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+            show_progress=not args.no_progress,
         )
         memory_count = len(getattr(agent.memory_system, "memories", {}))
         print(f"[sample={sample_idx}] memories={memory_count} qa_items={len(sample.qa)}", flush=True)
