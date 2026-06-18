@@ -18,6 +18,20 @@ notebooks/phase_runner.ipynb
 
 Cell đầu của notebook sẽ clone/pull repo trên rồi chạy code từ bản mới nhất.
 
+Official A-MEM + Layer-2 gate:
+
+```text
+OFFICIAL_AMEM_GATE.md
+```
+
+Runner này dùng đúng read-time pipeline robust của official A-MEM để so:
+
+```text
+--gates none              # không bọc gate, giữ A-MEM baseline
+--gates none,heuristic    # baseline + heuristic Layer-2 gate
+--gates none,heuristic,llm
+```
+
 Nói ngắn gọn: một memory có thể được retriever kéo lên top-k vì giống câu hỏi về mặt từ vựng/ngữ nghĩa, nhưng nó vẫn có thể không nên đưa vào prompt vì nó cũ, sai ngữ cảnh, mâu thuẫn, chỉ là background, hoặc quá tốn token so với giá trị thực sự. AAMem thêm một lớp gate sau retrieval và trước prompt để quyết định memory nào được phép dùng như premise.
 
 ## Ta đang đánh vào điểm nào?
