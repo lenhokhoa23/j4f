@@ -783,6 +783,26 @@ def _label_counts(decisions: Sequence[GateDecision]) -> Dict[str, int]:
     return counts
 
 
+def _count_planned_questions(samples: Sequence[Any], allowed_categories: set[int], max_questions: Optional[int]) -> int:
+    total = 0
+    for sample in samples:
+        for qa in sample.qa:
+            if int(qa.category) not in allowed_categories:
+                continue
+            total += 1
+            if max_questions is not None and total >= max_questions:
+                return total
+    return total
+
+
+def _make_progress_bar(total: int) -> Any:
+    try:
+        from tqdm.auto import tqdm
+    except Exception:
+        return None
+    return tqdm(total=total, desc="official A-MEM QA", unit="qa", dynamic_ncols=True)
+
+
 def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any]:
     amem_repo = Path(args.amem_repo).resolve()
     print("=== Official A-MEM robust read-time eval + optional Layer-2 gate ===", flush=True)
@@ -841,6 +861,10 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
     print(f"[config] gates={gates} packet_token_budget={args.packet_token_budget}", flush=True)
     print(f"[config] output_jsonl={jsonl_path}", flush=True)
     print(f"[config] output_summary={summary_path}", flush=True)
+
+    planned_questions = _count_planned_questions(samples, allowed_categories, args.max_questions)
+    progress_bar = None if args.no_progress else _make_progress_bar(planned_questions)
+    print(f"[progress] planned_questions={planned_questions}", flush=True)
 
     rows: List[Dict[str, Any]] = []
     metric_rows_by_gate: Dict[str, List[Dict[str, float]]] = defaultdict(list)
@@ -991,8 +1015,16 @@ def evaluate_official_amem_with_gates(args: argparse.Namespace) -> Dict[str, Any
                     f"gold={_preview_text(qa.final_answer or '', 120)}",
                     flush=True,
                 )
+            if progress_bar is not None:
+                progress_bar.update(1)
+                progress_bar.set_postfix(sample=sample_idx, qa=qa_idx, cat=category)
+            else:
+                print(f"[progress] completed={total_questions}/{planned_questions}", flush=True)
         if args.max_questions is not None and total_questions >= args.max_questions:
             break
+
+    if progress_bar is not None:
+        progress_bar.close()
 
     with jsonl_path.open("w", encoding="utf-8") as f:
         for row in rows:
@@ -1062,6 +1094,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tag", default=None)
     parser.add_argument("--include-prompts", action="store_true")
     parser.add_argument("--include-contexts", action="store_true")
+    parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bar; keep textual logs.")
     args = parser.parse_args()
     if args.ratio <= 0.0 or args.ratio > 1.0:
         raise ValueError("--ratio must be in (0, 1].")
