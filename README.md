@@ -16,6 +16,14 @@ Notebook Colab chính:
 notebooks/phase_runner.ipynb
 ```
 
+Notebook phân tích raw output lúc A-MEM ghi memory:
+
+```text
+notebooks/amem_write_trace_analysis.ipynb
+```
+
+Notebook này chạy official robust `add_note` theo từng turn LoCoMo và so sánh nhiều model ở bốn stage: tạo note, quyết định evolution, tạo link/strengthen và cập nhật neighbor. Nó lưu prompt, raw output, parser output, memory diff, link sai index và metadata bị ghi đè vào `runs/amem_write_trace`.
+
 Cell đầu của notebook sẽ clone/pull repo trên rồi chạy code từ bản mới nhất. Notebook này đã có section riêng để clone/pull official A-MEM, chạy baseline `none`, chạy gate `heuristic`/`llm`, stream log từng bước và in bảng so sánh cuối.
 
 Official A-MEM + Layer-2 gate:
